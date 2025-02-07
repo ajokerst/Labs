@@ -66,20 +66,20 @@ $stop = 0
 $tried_regions = New-Object Collections.Generic.List[string]
 while ($stop -ne 1) {
     write-host "Trying $Region..."
-    
+
     # Check for sufficient compute capacity
     $available_quota = 0
     $skus = Get-AzComputeResourceSku $Region | Where-Object {$_.ResourceType -eq "VirtualMachines" -and $_.Name -eq "standard_ds3_v2"}
-    
+
     if ($skus.length -gt 0) {
         $r = $skus.Restrictions
         if ($r -ne $null) {
             Write-Host $r[0].ReasonCode
         }
-        
+
         # Governor to manage VM quotas
         $quota = @(Get-AzVMUsage -Location $Region).where{$_.name.LocalizedValue -match 'Standard DSv2 Family vCPUs'}
-        $cores =  $quota.currentvalue
+        $cores = $quota.currentvalue
         $maxcores = $quota.limit
         Write-Host "$cores of $maxcores cores in use."
         $available_quota = $quota.limit - $quota.currentvalue
@@ -107,40 +107,36 @@ while ($stop -ne 1) {
         # Create Virtual Network for NAT Instance and Databricks
         $vnetName = "databricks-vnet-$suffix"
         Write-Host "Creating Virtual Network..."
-        $vnet = New-AzVirtualNetwork -ResourceGroupName $resourceGroupName -Location $Region `
-            -Name $vnetName -AddressPrefix "10.0.0.0/16"
-        
+        $vnet = New-AzVirtualNetwork -ResourceGroupName $resourceGroupName -Location $Region -Name $vnetName -AddressPrefix "10.0.0.0/16"
+
         # Create Subnets
         $publicSubnet = New-AzVirtualNetworkSubnetConfig -Name "public-subnet" -AddressPrefix "10.0.0.0/24"
         $privateSubnet = New-AzVirtualNetworkSubnetConfig -Name "private-subnet" -AddressPrefix "10.0.1.0/24"
+
+        # Add subnets to the virtual network
+        $vnet | Add-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
+        $vnet | Add-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
         
-        # Update virtual network configuration to include subnets
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
+        # Apply the changes to the virtual network
         Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
 
         # Create a Network Security Group
         $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $Region -Name "nsg-$suffix"
         
         # Attach NSG to the private subnet
-        $privateSubnet | Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
+        Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
 
         # Create NAT Instance using Standard_F1s
         Write-Host "Creating NAT Instance using Standard_F1s..."
         $natVMName = "nat-instance-$suffix"
-        $natPublicIP = New-AzPublicIpAddress -ResourceGroupName $resourceGroupName -Location $Region `
-            -Name "nat-ip-$suffix" -AllocationMethod Static -Sku Basic
+        $natPublicIP = New-AzPublicIpAddress -ResourceGroupName $resourceGroupName -Location $Region -Name "nat-ip-$suffix" -AllocationMethod Static -Sku Basic
         
-        $natNIC = New-AzNetworkInterface -ResourceGroupName $resourceGroupName -Location $Region `
-            -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[1].Id -PublicIpAddressId $natPublicIP.Id `
-            -EnableIPForwarding
+        $natNIC = New-AzNetworkInterface -ResourceGroupName $resourceGroupName -Location $Region -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[1].Id -PublicIpAddressId $natPublicIP.Id -EnableIPForwarding
 
         $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s"
         $natVMConfig = Add-AzVMNetworkInterface -VM $natVMConfig -Id $natNIC.Id
-        $natVM = Set-AzVMOperatingSystem -VM $natVMConfig -Linux -ComputerName $natVMName `
-            -Credential (New-Object PSCredential ("azureuser", (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force)))
-        $natVM = Set-AzVMSourceImage -VM $natVM -PublisherName "Canonical" -Offer "UbuntuServer" `
-            -Skus "18.04-LTS" -Version "latest"
+        $natVM = Set-AzVMOperatingSystem -VM $natVMConfig -Linux -ComputerName $natVMName -Credential (New-Object PSCredential ("azureuser", (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force)))
+        $natVM = Set-AzVMSourceImage -VM $natVM -PublisherName "Canonical" -Offer "UbuntuServer" -Skus "18.04-LTS" -Version "latest"
         
         Write-Host "Deploying NAT Instance VM..."
         New-AzVM -ResourceGroupName $resourceGroupName -Location $Region -VM $natVM | Out-Null
@@ -155,33 +151,26 @@ sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 sudo echo 1 > /proc/sys/net/ipv4/ip_forward
 sudo echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 "@
-        Invoke-AzVMRunCommand -ResourceGroupName $resourceGroupName -VMName $natVMName `
-            -CommandId "RunShellScript" -ScriptString $natScript
+        Invoke-AzVMRunCommand -ResourceGroupName $resourceGroupName -VMName $natVMName -CommandId "RunShellScript" -ScriptString $natScript
 
         # Create and Configure Route Table
         Write-Host "Configuring routing..."
-        $routeTable = New-AzRouteTable -ResourceGroupName $resourceGroupName -Location $Region `
-            -Name "nat-routes-$suffix"
-        Add-AzRouteConfig -RouteTable $routeTable -Name "ToInternet" -AddressPrefix "0.0.0.0/0" `
-            -NextHopType "VirtualAppliance" -NextHopIpAddress $natNIC.IpConfigurations[0].PrivateIpAddress | Set-AzRouteTable
+        $routeTable = New-AzRouteTable -ResourceGroupName $resourceGroupName -Location $Region -Name "nat-routes-$suffix"
+        Add-AzRouteConfig -RouteTable $routeTable -Name "ToInternet" -AddressPrefix "0.0.0.0/0" -NextHopType "VirtualAppliance" -NextHopIpAddress $natNIC.IpConfigurations[0].PrivateIpAddress | Set-AzRouteTable
         
-        Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" `
-            -RouteTable $routeTable | Set-AzVirtualNetwork
+        Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -RouteTable $routeTable | Set-AzVirtualNetwork
 
         # Create Databricks Workspace
         $dbworkspace = "databricks$suffix"
         Write-Host "Creating $dbworkspace Azure Databricks workspace in $resourceGroupName resource group..."
-        New-AzDatabricksWorkspace -Name $dbworkspace -ResourceGroupName $resourceGroupName `
-            -Location $Region -Sku standard -VirtualNetworkId $vnet.Id -PrivateSubnetName "private-subnet" `
-            -PublicSubnetName "public-subnet" | Out-Null
+        New-AzDatabricksWorkspace -Name $dbworkspace -ResourceGroupName $resourceGroupName -Location $Region -Sku standard -VirtualNetworkId $vnet.Id -PrivateSubnetName "private-subnet" -PublicSubnetName "public-subnet" | Out-Null
 
         # Grant permissions for Databricks workspace
         write-host "Granting permissions on the $dbworkspace resource..."
         write-host "(you can ignore any warnings!)"
         $subscriptionId = (Get-AzContext).Subscription.Id
         $userName = ((az ad signed-in-user show) | ConvertFrom-JSON).UserPrincipalName
-        New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Owner" `
-            -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Databricks/workspaces/$dbworkspace";
+        New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Owner" -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Databricks/workspaces/$dbworkspace";
 
         # Create Data Factory
         $dataFactoryName = "adf$suffix"
