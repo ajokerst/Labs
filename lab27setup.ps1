@@ -113,9 +113,9 @@ while ($stop -ne 1) {
         $publicSubnet = New-AzVirtualNetworkSubnetConfig -Name "public-subnet" -AddressPrefix "10.0.0.0/24"
         $privateSubnet = New-AzVirtualNetworkSubnetConfig -Name "private-subnet" -AddressPrefix "10.0.1.0/24"
 
-        # Add subnets to the virtual network
-        $vnet | Add-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
-        $vnet | Add-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
+        # Add subnets to the virtual network correctly
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
         
         # Apply the changes to the virtual network
         Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
