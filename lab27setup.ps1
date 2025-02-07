@@ -104,21 +104,12 @@ while ($stop -ne 1) {
         Write-Host "Creating $resourceGroupName resource group ..."
         New-AzResourceGroup -Name $resourceGroupName -Location $Region | Out-Null
 
-        # Create Virtual Network for NAT Instance and Databricks
-        $vnetName = "databricks-vnet-$suffix"
-        Write-Host "Creating Virtual Network..."
-        $vnet = New-AzVirtualNetwork -ResourceGroupName $resourceGroupName -Location $Region -Name $vnetName -AddressPrefix "10.0.0.0/16"
-
         # Create Subnets
         $publicSubnet = New-AzVirtualNetworkSubnetConfig -Name "public-subnet" -AddressPrefix "10.0.0.0/24"
         $privateSubnet = New-AzVirtualNetworkSubnetConfig -Name "private-subnet" -AddressPrefix "10.0.1.0/24"
 
-        # Add subnets to the virtual network correctly
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
-        
-        # Apply the changes to the virtual network
-        Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
+        # Create Virtual Network with Subnets
+        $vnet = New-AzVirtualNetwork -Name "databricks-vnet-$suffix" -ResourceGroupName $resourceGroupName -Location $Region -AddressPrefix "10.0.0.0/16" -Subnet $publicSubnet, $privateSubnet
 
         # Create a Network Security Group
         $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $Region -Name "nsg-$suffix"
