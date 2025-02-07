@@ -3,33 +3,25 @@ write-host "Starting script at $(Get-Date)"
 
 # Handle cases where the user has multiple subscriptions
 $subs = Get-AzSubscription | Select-Object
-if($subs.GetType().IsArray -and $subs.length -gt 1){
+if ($subs.GetType().IsArray -and $subs.length -gt 1) {
     Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
-    for($i = 0; $i -lt $subs.length; $i++)
-    {
-            Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
+    for ($i = 0; $i -lt $subs.length; $i++) {
+        Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
     }
     $selectedIndex = -1
     $selectedValidIndex = 0
-    while ($selectedValidIndex -ne 1)
-    {
-            $enteredValue = Read-Host("Enter 0 to $($subs.Length - 1)")
-            if (-not ([string]::IsNullOrEmpty($enteredValue)))
-            {
-                if ([int]$enteredValue -in (0..$($subs.Length - 1)))
-                {
-                    $selectedIndex = [int]$enteredValue
-                    $selectedValidIndex = 1
-                }
-                else
-                {
-                    Write-Output "Please enter a valid subscription number."
-                }
-            }
-            else
-            {
+    while ($selectedValidIndex -ne 1) {
+        $enteredValue = Read-Host("Enter 0 to $($subs.Length - 1)")
+        if (-not ([string]::IsNullOrEmpty($enteredValue))) {
+            if ([int]$enteredValue -in (0..$($subs.Length - 1))) {
+                $selectedIndex = [int]$enteredValue
+                $selectedValidIndex = 1
+            } else {
                 Write-Output "Please enter a valid subscription number."
             }
+        } else {
+            Write-Output "Please enter a valid subscription number."
+        }
     }
     $selectedSub = $subs[$selectedIndex].Id
     Select-AzSubscription -SubscriptionId $selectedSub
@@ -39,20 +31,20 @@ if($subs.GetType().IsArray -and $subs.length -gt 1){
 # Register resource providers
 Write-Host "Registering resource providers..."
 $provider_list = "Microsoft.Storage", "Microsoft.Compute", "Microsoft.Network", "Microsoft.Databricks"
-foreach ($provider in $provider_list){
+foreach ($provider in $provider_list) {
     $result = Register-AzResourceProvider -ProviderNamespace $provider
     $status = $result.RegistrationState
     Write-Host "$provider : $status"
 }
 
 # Generate unique random suffix
-[string]$suffix =  -join ((48..57) + (97..122) | Get-Random -Count 7 | % {[char]$_})
+[string]$suffix = -join ((48..57) + (97..122) | Get-Random -Count 7 | % {[char]$_})
 Write-Host "Your randomly-generated suffix for Azure resources is $suffix"
 
 # Prepare to deploy
 Write-Host "Preparing to deploy. This may take several minutes..."
 $delay = 0, 30, 60, 90, 120 | Get-Random
-Start-Sleep -Seconds $delay # random delay to stagger requests from multi-student classes
+Start-Sleep -Seconds $delay # random delay for staggering requests
 
 # Get a list of locations for Azure Databricks
 $locations = Get-AzLocation | Where-Object {
@@ -63,29 +55,25 @@ $max_index = $locations.Count - 1
 $rand = (0..$max_index) | Get-Random
 
 # Set region for resource creation
-if ($args.count -gt 0 -And $args[0] -in $locations.Location)
-{
+if ($args.count -gt 0 -And $args[0] -in $locations.Location) {
     $Region = $args[0]
-}
-else {
+} else {
     $Region = $locations.Get($rand).Location
 }
 
 # Try to create an Azure Databricks workspace in a region that has capacity
 $stop = 0
 $tried_regions = New-Object Collections.Generic.List[string]
-while ($stop -ne 1){
+while ($stop -ne 1) {
     write-host "Trying $Region..."
     
     # Check for sufficient compute capacity
     $available_quota = 0
     $skus = Get-AzComputeResourceSku $Region | Where-Object {$_.ResourceType -eq "VirtualMachines" -and $_.Name -eq "standard_ds3_v2"}
     
-    if ($skus.length -gt 0)
-    {
+    if ($skus.length -gt 0) {
         $r = $skus.Restrictions
-        if ($r -ne $null)
-        {
+        if ($r -ne $null) {
             Write-Host $r[0].ReasonCode
         }
         
@@ -98,23 +86,20 @@ while ($stop -ne 1){
     }
 
     # Determine if there is capacity in the region
-    if (($available_quota -lt 4) -or ($skus.length -eq 0))
-    {
+    if (($available_quota -lt 4) -or ($skus.length -eq 0)) {
         Write-Host "$Region has insufficient capacity."
         $tried_regions.Add($Region)
         $locations = $locations | Where-Object {$_.Location -notin $tried_regions}
-        if ($locations.Count -ne 1){
+        if ($locations.Count -ne 1) {
             $rand = (0..$($locations.Count - 1)) | Get-Random
             $Region = $locations.Get($rand).Location
             $stop = 0
-        }
-        else {
+        } else {
             Write-Host "Could not create a Databricks workspace."
             Write-Host "Use the Azure portal to add one to the $resourceGroupName resource group."
             $stop = 1
         }
-    }
-    else {
+    } else {
         $resourceGroupName = "dp203-$suffix"
         Write-Host "Creating $resourceGroupName resource group ..."
         New-AzResourceGroup -Name $resourceGroupName -Location $Region | Out-Null
@@ -128,17 +113,17 @@ while ($stop -ne 1){
         # Create Subnets
         $publicSubnet = New-AzVirtualNetworkSubnetConfig -Name "public-subnet" -AddressPrefix "10.0.0.0/24"
         $privateSubnet = New-AzVirtualNetworkSubnetConfig -Name "private-subnet" -AddressPrefix "10.0.1.0/24"
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet 
-        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
         
-        $vnet.Subnets = @($publicSubnet, $privateSubnet)
+        # Update virtual network configuration to include subnets
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
         Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
 
         # Create a Network Security Group
         $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $Region -Name "nsg-$suffix"
         
-        # Attach NSG to private subnet
-        Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
+        # Attach NSG to the private subnet
+        $privateSubnet | Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
 
         # Create NAT Instance using Standard_F1s
         Write-Host "Creating NAT Instance using Standard_F1s..."
@@ -147,7 +132,7 @@ while ($stop -ne 1){
             -Name "nat-ip-$suffix" -AllocationMethod Static -Sku Basic
         
         $natNIC = New-AzNetworkInterface -ResourceGroupName $resourceGroupName -Location $Region `
-            -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $natPublicIP.Id `
+            -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[1].Id -PublicIpAddressId $natPublicIP.Id `
             -EnableIPForwarding
 
         $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s"
