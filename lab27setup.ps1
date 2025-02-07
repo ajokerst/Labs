@@ -37,7 +37,7 @@ if($subs.GetType().IsArray -and $subs.length -gt 1){
 }
 
 # Register resource providers
-Write-Host "Registering resource providers...";
+Write-Host "Registering resource providers..."
 $provider_list = "Microsoft.Storage", "Microsoft.Compute", "Microsoft.Network", "Microsoft.Databricks"
 foreach ($provider in $provider_list){
     $result = Register-AzResourceProvider -ProviderNamespace $provider
@@ -50,7 +50,7 @@ foreach ($provider in $provider_list){
 Write-Host "Your randomly-generated suffix for Azure resources is $suffix"
 
 # Prepare to deploy
-Write-Host "Preparing to deploy. This may take several minutes...";
+Write-Host "Preparing to deploy. This may take several minutes..."
 $delay = 0, 30, 60, 90, 120 | Get-Random
 Start-Sleep -Seconds $delay # random delay to stagger requests from multi-student classes
 
@@ -62,7 +62,7 @@ $locations = Get-AzLocation | Where-Object {
 $max_index = $locations.Count - 1
 $rand = (0..$max_index) | Get-Random
 
-# Start with preferred region if specified, otherwise choose one at random
+# Set region for resource creation
 if ($args.count -gt 0 -And $args[0] -in $locations.Location)
 {
     $Region = $args[0]
@@ -76,29 +76,29 @@ $stop = 0
 $tried_regions = New-Object Collections.Generic.List[string]
 while ($stop -ne 1){
     write-host "Trying $Region..."
-    # Check that the required SKU is available
-    $skuOK = 1
+    
+    # Check for sufficient compute capacity
+    $available_quota = 0
     $skus = Get-AzComputeResourceSku $Region | Where-Object {$_.ResourceType -eq "VirtualMachines" -and $_.Name -eq "standard_ds3_v2"}
+    
     if ($skus.length -gt 0)
     {
         $r = $skus.Restrictions
         if ($r -ne $null)
         {
-            $skuOK = 0
             Write-Host $r[0].ReasonCode
         }
-    }
-    # Get the available quota
-    $available_quota = 0
-    if ($skuOK -eq 1)
-    {
+        
+        # Governor to manage VM quotas
         $quota = @(Get-AzVMUsage -Location $Region).where{$_.name.LocalizedValue -match 'Standard DSv2 Family vCPUs'}
         $cores =  $quota.currentvalue
         $maxcores = $quota.limit
-        write-host "$cores of $maxcores cores in use."
+        Write-Host "$cores of $maxcores cores in use."
         $available_quota = $quota.limit - $quota.currentvalue
     }
-    if (($available_quota -lt 4) -or ($skuOK -eq 0))
+
+    # Determine if there is capacity in the region
+    if (($available_quota -lt 4) -or ($skus.length -eq 0))
     {
         Write-Host "$Region has insufficient capacity."
         $tried_regions.Add($Region)
@@ -131,7 +131,11 @@ while ($stop -ne 1){
         $vnet.Subnets = @($publicSubnet, $privateSubnet)
         Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
 
-        # Create NAT Instance using Standard_F1s (cheapest VM)
+        # Create a Network Security Group
+        $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $Region -Name "nsg-$suffix"
+        Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
+
+        # Create NAT Instance using Standard_F1s
         Write-Host "Creating NAT Instance using Standard_F1s..."
         $natVMName = "nat-instance-$suffix"
         $natPublicIP = New-AzPublicIpAddress -ResourceGroupName $resourceGroupName -Location $Region `
@@ -141,12 +145,11 @@ while ($stop -ne 1){
             -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $natPublicIP.Id `
             -EnableIPForwarding
 
-        $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s"
+        $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s" -NetworkProfile @{ Id = $natNIC.Id }
         $natVM = Set-AzVMOperatingSystem -VM $natVMConfig -Linux -ComputerName $natVMName `
             -Credential (New-Object PSCredential ("azureuser", (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force)))
         $natVM = Set-AzVMSourceImage -VM $natVM -PublisherName "Canonical" -Offer "UbuntuServer" `
             -Skus "18.04-LTS" -Version "latest"
-        $natVM = Add-AzVMNetworkInterface -VM $natVM -Id $natNIC.Id
         
         Write-Host "Deploying NAT Instance VM..."
         New-AzVM -ResourceGroupName $resourceGroupName -Location $Region -VM $natVM | Out-Null
@@ -172,7 +175,7 @@ sudo echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
             -NextHopType "VirtualAppliance" -NextHopIpAddress $natNIC.IpConfigurations[0].PrivateIpAddress | Set-AzRouteTable
         
         Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" `
-            -AddressPrefix "10.0.1.0/24" -RouteTable $routeTable | Set-AzVirtualNetwork
+            -RouteTable $routeTable | Set-AzVirtualNetwork
 
         # Create Databricks Workspace
         $dbworkspace = "databricks$suffix"
@@ -181,7 +184,7 @@ sudo echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
             -Location $Region -Sku standard -VirtualNetworkId $vnet.Id -PrivateSubnetName "private-subnet" `
             -PublicSubnetName "public-subnet" | Out-Null
 
-        # Make the current user an owner of the databricks workspace
+        # Grant permissions for Databricks workspace
         write-host "Granting permissions on the $dbworkspace resource..."
         write-host "(you can ignore any warnings!)"
         $subscriptionId = (Get-AzContext).Subscription.Id
