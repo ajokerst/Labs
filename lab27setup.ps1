@@ -128,11 +128,16 @@ while ($stop -ne 1){
         # Create Subnets
         $publicSubnet = New-AzVirtualNetworkSubnetConfig -Name "public-subnet" -AddressPrefix "10.0.0.0/24"
         $privateSubnet = New-AzVirtualNetworkSubnetConfig -Name "private-subnet" -AddressPrefix "10.0.1.0/24"
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $publicSubnet 
+        $vnet | Set-AzVirtualNetworkSubnetConfig -Subnet $privateSubnet
+        
         $vnet.Subnets = @($publicSubnet, $privateSubnet)
         Set-AzVirtualNetwork -VirtualNetwork $vnet | Out-Null
 
         # Create a Network Security Group
         $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $Region -Name "nsg-$suffix"
+        
+        # Attach NSG to private subnet
         Set-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name "private-subnet" -NetworkSecurityGroup $nsg | Set-AzVirtualNetwork
 
         # Create NAT Instance using Standard_F1s
@@ -145,7 +150,8 @@ while ($stop -ne 1){
             -Name "nat-nic-$suffix" -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $natPublicIP.Id `
             -EnableIPForwarding
 
-        $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s" -NetworkProfile @{ Id = $natNIC.Id }
+        $natVMConfig = New-AzVMConfig -VMName $natVMName -VMSize "Standard_F1s"
+        $natVMConfig = Add-AzVMNetworkInterface -VM $natVMConfig -Id $natNIC.Id
         $natVM = Set-AzVMOperatingSystem -VM $natVMConfig -Linux -ComputerName $natVMName `
             -Credential (New-Object PSCredential ("azureuser", (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force)))
         $natVM = Set-AzVMSourceImage -VM $natVM -PublisherName "Canonical" -Offer "UbuntuServer" `
